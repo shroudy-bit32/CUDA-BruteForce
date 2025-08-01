@@ -90,7 +90,7 @@ int main()
 
 	char* c;
 
-	size_t size = totalComb * 7 * sizeof(char);
+	size_t size = chunksize * sizeof(char);
 
 	cudaMalloc(&c, size);
 
