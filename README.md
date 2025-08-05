@@ -50,4 +50,5 @@ nvcc -O3 -gencode arch=compute_89,code=sm_89 -Xptxas -v --use_fast_math --maxrre
 
   ## 📄 License
 
-MIT License — free to use, modify, and distribute.
+This project is licensed under the MIT License.  
+See the full license text in the [LICENSE](LICENSE) file.
