@@ -1,23 +1,21 @@
 ﻿/*
-////////////////////////SOME INFO'S ABOUT GPU ARCHITECTURE/////////////////////////////
+////////////////////////SOME INFO'S ABOUT NVIDIA GPU ARCHITECTURE/////////////////////////////
 //			MEMORY TYPES:
-//		Register ->	Fastest memory units	(There is 65536 Register unit in RTX4080 )
+//		Register ->	Fastest memory units 	(There is 65536 Register unit in RTX4080 )
 //		Shared Memory -> Second fastest memory unit (Sometimes its related to process u will make)
-//		Constant Memory
+//		Constant Memory ->
 //      L1 Cache
 //		L2 Cache
-//		Local memory -> Very slow
+//		Global memory -> Very slow
 //
-//-----------------------RTX 4080 MOBILE (Reminding for my device)-----------------------------------------------
-//		65536 register at shader memory
+//
+//-----------------------RTX 4080 MOBILE INFO (Reminding for my device)-----------------------------------------------
+//		65536 register at shader memory	and 256KB per SM
 //		7424 CUDA thread
-//		64 KB Cconstant Memory
+//		64 KB Constant Memory
+//		Shared Memory max 99KB(default) with some private config maybe max 163 kb per SM
 ////////////////////////////////////////////////////////////////////////////////////////
 */
-
-
-
-
 
 
 #include "cuda_runtime.h"
@@ -27,30 +25,31 @@
 #include <string>
 #include <nvml.h>
 #include <thread>
-
-//#include <openssl/sha.h>		 we do all things ourselves so we dont need this 😎
+#include <Windows.h>
 
 using namespace std;
 
+#define chunksizeDEFİNED  29696
+#define buffDEFİNED 50
+#define threadPerBlockDEFİNED 256
 
-//will be added defines or just make a config.h
 
-__device__ __constant__ uint8_t	TARGET_HASH[32]{
-	0x5e, 0x88, 0x41, 0x79, 0x4b, 0xe6, 0x0e, 0x26,
-	0x8d, 0x70, 0x9d, 0x3d, 0x6f, 0xa7, 0x4f, 0x3f,
-	0xa1, 0x9f, 0xa1, 0x5a, 0xc7, 0xff, 0xa7, 0x9f,
-	0x7a, 0x79, 0x4e, 0x3d, 0x30, 0x49, 0x44, 0x2c		// Example hash ("password")
+__device__ __constant__ uint8_t TARGET_HASH[32] =
+{
+	0x38, 0x78, 0x22, 0x10, 0x12, 0xd3, 0x78, 0x5e, 0x4f, 0x21, 0xee, 0xf3, 0x71, 0x19, 0x41, 0x0a,
+	0x7e, 0xd8, 0xeb, 0xb5, 0xde, 0x28, 0xef, 0x82, 0xc0, 0xca, 0xd4, 0x8d, 0x8c, 0xdc, 0x5d, 0x04
 };
+//dont forget GPT will probably hash it wrong so use web sites for encrypt
+
+//void get_device_properties();						   //we deleted ts for now bc intellisense is dedecting nvmlInit but nvcc cant
+													   // will be fixed after the debug
 
 
-int calc_opt_mem(int a);
-void device_properties();
+__global__ void kernel(int numberOfdigit, uint64_t offset, uint8_t* D_flags, char* __restrict__ D_CORRECT_PASSWORD);
 
-__global__ void kernel(char* D_charset, int lengthSet, int numberOfdigit, char* c, int chunksize, uint64_t offset);
+__device__ void generatePassword(uint8_t* __restrict__ c, uint8_t numberOfdigit, uint64_t offset, uint32_t globalThreadID, uint8_t* __restrict__ D_flags, char* __restrict__ D_CORRECT_PASSWORD, uint64_t globalCombID);
 
-__device__ void generatePassword(char* D_charset, int lengthSet, int numberOfdigit, char* c, int chunksize, uint64_t offset, uint64_t globalThreadID);
-
-__device__ void sha256(char* c, int numberOfdigit, uint64_t globalThreadID);
+__device__ void sha256(uint8_t* __restrict__ c, uint8_t numberOfdigit, uint32_t globalThreadID, uint8_t* __restrict__ D_flags, char* __restrict__ D_CORRECT_PASSWORD);
 __device__ uint32_t Q0(uint32_t x);
 __device__ uint32_t Q1(uint32_t x);
 __device__ uint32_t E0(uint32_t x);
@@ -60,140 +59,83 @@ __device__ uint32_t MAJ(uint32_t x, uint32_t y, uint32_t z);
 __device__ uint32_t ROTR(uint32_t x, uint8_t n);
 __device__ uint32_t SHR(uint32_t x, uint8_t n);
 
-__device__ void control(uint8_t hash, uint64_t globalThreadID);
+__device__ void control(uint8_t* __restrict__ hash, uint8_t numberOfdigit, uint32_t globalThreadID, uint8_t* __restrict__ c, uint8_t* __restrict__ D_flags, char* __restrict__ D_CORRECT_PASSWORD);
 
 
 int main()
 {
 
-	const string charset = "abcdefghijklmnopqrstuvwxyz";
+	//uint64_t offset = 1;	   //we need to know which combination gpu stayed at then start from there to try combinations
 
-	int lengthSet = charset.length();
-	//uint64_t totalComb = lengthSet;				//thats bc the first random password will be 1 digit thats why at first lengthSet equal to totalcomb
-
-
-	uint8_t flags = 0;
-
-	char* D_charset;
-	cudaMalloc(&D_charset, lengthSet * sizeof(char));
-	cudaMemcpy(D_charset, charset.c_str(), lengthSet * sizeof(char), cudaMemcpyHostToDevice);
+	SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_AWAYMODE_REQUIRED);		//well well well welcome to dark side (Set's cpu to performance mode)
 
 
-	//Device processes
+	uint64_t chunksize = chunksizeDEFİNED;
+	int threadPerBlock = threadPerBlockDEFİNED;
+	uint64_t blockPerGrid = (chunksize + threadPerBlock - 1) / threadPerBlock;
+
+	char* D_CORRECT_PASSWORD;
+	uint8_t* D_flags = 0;
+
+	cudaHostAlloc(&D_CORRECT_PASSWORD, 32, cudaHostAllocMapped);
+	cudaHostAlloc(&D_flags, 1, cudaHostAllocMapped);			// we didnt want to slow down kernel with copy paste process of flags, D_flags (cudaMemcpy)
+	// so we said kernel to hold some place at RAM, Device and Host can acces this address
+	// and somehow its not slow as normal RAM
+	cudaEvent_t start, stop, startLoop, stopLoop;
+	float elapsedTime, elapsedTimeLoop;
+
+	cudaEventCreate(&start);
+	cudaEventCreate(&stop);
+	cudaEventCreate(&startLoop);
+	cudaEventCreate(&stopLoop);
+
+	cudaEventRecord(start);
+
 	int numberOfdigit = 1;
-	int chunksize = 100000000; //if numberofdigit is so big there could be security problems (so big totalcomb) so we need to divide it with the chunk size hundred million
-	//Fun fact:  we dont use totalcomb anymore bc its fills memory so much and just chunk solution is better
-	uint64_t offset = 0;	   //if totalcomb so big we need to optimize GPU threads so we are using offset to know which combination gpu stayed at then starting from there to try combinations
+	uint64_t offset = 0;
 
-	int threadPerBlock = 256;
-	uint64_t blockPerGrid;
+	for (; ((*D_flags & 1) == 0) && numberOfdigit < 6; numberOfdigit++)
+	{
+		offset = 0;  // Her digit için baştan başlanır
 
-	char* c;
+		uint64_t totalComb = 1;
+		for (int i = 0; i < numberOfdigit; i++) totalComb *= 32;
 
-	size_t size = chunksize * sizeof(char);
+		cudaEventRecord(startLoop);
 
-	cudaMalloc(&c, size);
+		while (offset < totalComb && ((*D_flags & 1) == 0))
+		{
 
 
+			kernel << <blockPerGrid, threadPerBlock >> > (numberOfdigit, offset, D_flags, D_CORRECT_PASSWORD);
+			cudaDeviceSynchronize();
 
+			offset += chunksize * buffDEFİNED;
+
+		}
+
+		cudaEventRecord(stopLoop);
+		cudaEventSynchronize(stopLoop);
+		cudaEventElapsedTime(&elapsedTimeLoop, startLoop, stopLoop);
+		printf("Digit %d ended\n\tPassedTime: %.4f ms\n", numberOfdigit, elapsedTimeLoop);
+	}
+
+	cudaEventRecord(stop);
+	cudaEventSynchronize(stop);
+
+
+	cudaEventElapsedTime(&elapsedTime, start, stop);
+
+
+	if (*D_flags == 1) {
+		printf("Password found:\n\t%s\n", D_CORRECT_PASSWORD);
+		printf("Passed time:  %.5f ms\n", elapsedTime);
+	}
+
+	system("pause");
 
 	return 0;
 }
-
-void device_properties()			//we nearly get info enough to make HWmonitor
-{
-	cudaDeviceProp properties;
-
-	cudaGetDeviceProperties(&properties, 0);
-
-
-	size_t totalVram, freeVram;
-
-	cudaMemGetInfo(&freeVram, &totalVram);
-
-	string arch;
-
-	if (properties.major == 9) { arch = "Ada Lovelace"; }
-	if (properties.major == 8) { arch = "Ampere"; }
-	if (properties.major == 7 && properties.minor == 0) { arch = "Volta"; }
-	else if (properties.major == 7 && properties.minor == 5) { arch = "Turing"; }
-	if (properties.major == 6) { arch = "Pascal"; }
-	if (properties.major == 5) { arch = "Maxwell"; }
-	if (properties.major == 3) { arch = "Kepler"; }
-	if (properties.major == 2) { arch = "Fermi"; }
-	if (properties.major == 1) { arch = "Tesla"; }
-
-
-
-	nvmlReturn_t result;
-	nvmlDevice_t device;
-	unsigned int clockSpeed;
-	unsigned int SMspeed;
-	unsigned int boostClock;
-	unsigned int power;
-	unsigned int defaultLimit;
-	nvmlEnableState_t mode;
-	nvmlDevicePerfModes_t perfModes;
-	nvmlUtilization_t utilization;
-	size_t l2CacheKB;
-
-	result = nvmlInit();
-	if (NVML_SUCCESS != result) { printf("NVML Init failed:  %s\n", nvmlErrorString(result)); return; }
-
-	result = nvmlDeviceGetHandleByIndex(0, &device);
-	if (NVML_SUCCESS != result) { printf("Handling failed:  %s", nvmlErrorString(result)); nvmlShutdown(); return; }
-
-
-	result = nvmlDeviceGetClockInfo(device, NVML_CLOCK_GRAPHICS, &clockSpeed);
-	if (NVML_SUCCESS != result) { printf("Failed to get clock speed:  %s", nvmlErrorString(result)); }
-
-
-	result = nvmlDeviceGetClockInfo(device, NVML_CLOCK_SM, &SMspeed);
-	if (NVML_SUCCESS != result) { printf("Failed to get Shader memory speed:  %s", nvmlErrorString(result)); }
-
-
-	result = nvmlDeviceGetMaxClockInfo(device, NVML_CLOCK_GRAPHICS, &boostClock);
-	if (NVML_SUCCESS != result) { printf("Failed to get boost clock info:  %s", nvmlErrorString(result)); }
-
-
-	result = nvmlDeviceGetPowerUsage(device, &power);
-	if (NVML_SUCCESS != result) { printf("Failed to get power usage: %s", nvmlErrorString(result)); }
-
-
-	result = nvmlDeviceGetPowerManagementDefaultLimit(device, &defaultLimit);
-	if (NVML_SUCCESS != result) { printf("Failed to get default power limit:  %s", nvmlErrorString(result)); }
-
-	unsigned int max_power_limit;
-	result = nvmlDeviceGetEnforcedPowerLimit(device, &max_power_limit);
-	if (NVML_SUCCESS != result) { printf("Failed to get enforced power limit:  %s", nvmlErrorString(result)); }
-
-
-	result = nvmlDeviceGetPowerManagementMode(device, &mode);
-	if (NVML_SUCCESS != result) { printf("Failed to get power management mode:  %s", nvmlErrorString(result)); }
-
-
-	result = nvmlDeviceGetPerformanceModes(device, &perfModes);
-	if (NVML_SUCCESS != result) { printf("Failed to get peformance mode:  %s", nvmlErrorString(result)); }
-
-
-	result = nvmlDeviceGetUtilizationRates(device, &utilization);
-	if (NVML_SUCCESS != result) { printf("Failed to get utilization rate:  %s", nvmlErrorString(result)); }
-
-
-	l2CacheKB = properties.l2CacheSize / 1024;
-
-	nvmlShutdown();
-
-}
-
-
-
-int calc_opt_mem(int a)
-{
-	return 4 * a / 5;
-}
-
-
 
 
 __device__ __constant__ uint32_t K[64] = {
@@ -216,79 +158,100 @@ __device__ __constant__ uint32_t K[64] = {
 };
 
 
-__global__ void kernel(char* D_charset, int lengthSet, int numberOfdigit, char* c, int chunksize, uint64_t offset)
+__device__ __constant__ char D_charset[32] = { 'a','b','c','d','e','f','g','h',
+											  'i','j','k','l','m','n','o','p',
+											  'q','r','s','t','u','v','w','x',
+											  'y','z', ' ', ' ', ' ', ' ', ' ' };
+//we filled last 6 with spaces bc now we can use more bitwise operations which is so much faster
+//and with this if u change Charset dont forget to change charset optimizations which is for 32 digit charset
+
+
+
+/*
+__device__ __constant__ char D_charset[26] =
 {
-	uint64_t globalThreadID = blockIdx.x * blockDim.x + threadIdx.x;
+	'a','b','c','d','e','f','g','h','i','j','k','l','m',
+	'n','o','p','q','r','s','t','u','v','w','x','y','z'
+};
+*/
 
-	//generate random passwords
-	generatePassword(D_charset, lengthSet, numberOfdigit, c, chunksize, offset, globalThreadID);
+__device__ __constant__ int lengthSet = 32;
+//__device__ __constant__ int chunksize = chunksizeDEFİNED;
+__device__ __constant__ int buff = buffDEFİNED;
 
-	//hash all generated passwords
-	sha256(c, numberOfdigit, globalThreadID);
+__global__ void kernel(int numberOfdigit, uint64_t offset, uint8_t* D_flags, char* __restrict__ D_CORRECT_PASSWORD)
+{
 
+	uint32_t globalThreadID = blockIdx.x * blockDim.x + threadIdx.x;
+	register uint8_t c[64];
+
+	for (int k = 0; k < buff; k++)
+	{
+		//generate random passwords
+		uint64_t globalCombID = offset + ((uint64_t)globalThreadID * buff) + k;
+		generatePassword(c, numberOfdigit, offset, globalThreadID, D_flags, D_CORRECT_PASSWORD, globalCombID);
+	}
 }
 
 
-__device__ void generatePassword(char* D_charset, int lengthSet, int numberOfdigit, char* c, int chunksize, uint64_t offset, uint64_t globalThreadID)
+__device__ void generatePassword(uint8_t* __restrict__ c, uint8_t numberOfdigit, uint64_t offset, uint32_t globalThreadID, uint8_t* __restrict__ D_flags, char* __restrict__ D_CORRECT_PASSWORD, uint64_t globalCombID)
 {
-	uint64_t globalCombID = offset + globalThreadID;
 
-
+#pragma unroll
 	for (int a = numberOfdigit - 1; a >= 0; a--)
 	{
-		c[globalThreadID * numberOfdigit + a] = D_charset[globalCombID % lengthSet];
-		globalCombID /= lengthSet;
+		c[a] = D_charset[globalCombID & 31];				//if you want to change charset length change 31 and 5 with lengthSet
+		globalCombID >>= 5;									//and change '&' with '%' and change '>>' with '/' 
+
 	}
 
+	sha256(c, numberOfdigit, globalThreadID, D_flags, D_CORRECT_PASSWORD);
 }
 
 
 
-__device__ void sha256(char* c, int numberOfdigit, uint64_t globalThreadID)
+__device__ void sha256(uint8_t* __restrict__ c, uint8_t numberOfdigit, uint32_t globalThreadID, uint8_t* __restrict__ D_flags, char* __restrict__ D_CORRECT_PASSWORD)
 {
-	uint8_t padded[64];							//every password combination is separated to thread's local/ registry memory
-	uint64_t bitLength = numberOfdigit * 8;
-	uint8_t hash[32];
-	uint32_t w[64];
+
+	uint16_t bitLength = numberOfdigit * 8;
+
+	register uint8_t hash[32];
+	register uint32_t w[64];
 
 
+	//every password combination is separated to thread's local/ registry memory
 	//--------------------------------------------------------SHA 256 PADDİNG-------------------------------------------------------)
 
-	for (int a = 0; a < numberOfdigit; a++)
-	{
-		padded[a] = c[globalThreadID * numberOfdigit + a];
-	}
-
-
 	//-----------------------------------------------------------------------------------
-	padded[numberOfdigit] = 0x80;				//appending '1' bit to right of the password
+	c[numberOfdigit] = 0x80;				//appending '1' bit to right of the password
 	//-----------------------------------------------------------------------------------
 
+
+#pragma unroll
 	for (int a = numberOfdigit + 1; a < 56; a++)
 	{
-		padded[a] = 0x00;						//appending 0 till it reaches 448 unit bit
+		c[a] = 0x00;						//appending 0 till it reaches 448 unit bit
 	}
 
+#pragma unroll
 	for (int a = 0; a < 8; a++)
 	{
-		padded[63 - a] = (bitLength >> (a * 8)) & 0xFF;
+		c[63 - a] = (bitLength >> (a * 8)) & 0xFF;
 	}
 	//--------------------------------------------------------END OF PADDİNG--------------------------------------------------------)
 
-
-
-
+#pragma unroll
 	for (int a = 0; a < 16; a++)		//Generates W array's element
 	{
 		w[a] = (
-			(uint32_t)padded[(a * 4)] << 24 |
-			(uint32_t)padded[(a * 4) + 1] << 16 |
-			(uint32_t)padded[(a * 4) + 2] << 8 |
-			(uint32_t)padded[(a * 4) + 3]
+			(uint32_t)c[(a * 4)] << 24 |
+			(uint32_t)c[(a * 4) + 1] << 16 |
+			(uint32_t)c[(a * 4) + 2] << 8 |
+			(uint32_t)c[(a * 4) + 3]
 			);
-
 	}
 
+#pragma unroll	
 	for (int a = 16; a < 64; a++)
 	{
 		w[a] = Q1(w[a - 2]) + w[a - 7] + Q0(w[a - 15]) + w[a - 16];
@@ -317,6 +280,7 @@ __device__ void sha256(char* c, int numberOfdigit, uint64_t globalThreadID)
 	uint32_t H6 = G;
 	uint32_t H7 = H;
 
+#pragma unroll
 	for (int m = 0; m < 64; m++)
 	{
 		T1 = H + E1(E) + CH(E, F, G) + K[m] + w[m];
@@ -383,54 +347,53 @@ __device__ void sha256(char* c, int numberOfdigit, uint64_t globalThreadID)
 	hash[30] = (H7 >> 8) & 0xFF;
 	hash[31] = (H7 >> 0) & 0xFF;
 
-	control(hash, numberOfdigit, globalThreadID, c);	//we are calling control() method in sha256 method bc the hash array is in the threads local memory
+	control(hash, numberOfdigit, globalThreadID, c, D_flags, D_CORRECT_PASSWORD);	//we are calling control() method in sha256 method bc the hash array is in the threads local memory
+
 }
 
 //-----------------------------------SHA 256 TOOLS-------------------------------------------------------------)
 
-__device__ uint32_t Q0(uint32_t x)						//Q0 references to small sigma0
+__device__ __forceinline__ uint32_t Q0(uint32_t x)						//Q0 references to small sigma0
 {
 	return ROTR(x, 7) ^ ROTR(x, 18) ^ SHR(x, 3);
 }
 
-__device__ uint32_t Q1(uint32_t x)						//Q1 references to small sigma1
+__device__ __forceinline__ uint32_t Q1(uint32_t x)						//Q1 references to small sigma1
 {
 	return ROTR(x, 17) ^ ROTR(x, 19) ^ SHR(x, 10);
 }
 
 
-
-
-__device__ uint32_t E0(uint32_t x)						//E0 references to big sigma0
+__device__ __forceinline__ uint32_t E0(uint32_t x)						//E0 references to big sigma0
 {
 	return ROTR(x, 2) ^ ROTR(x, 13) ^ ROTR(x, 22);
 }
 
-__device__ uint32_t E1(uint32_t x)						//E0 references to big sigma1
+__device__ __forceinline__ uint32_t E1(uint32_t x)						//E0 references to big sigma1
 {
 	return ROTR(x, 6) ^ ROTR(x, 11) ^ ROTR(x, 25);
 }
 
 
 
-__device__ uint32_t CH(uint32_t x, uint32_t y, uint32_t z)
+__device__ __forceinline__ uint32_t CH(uint32_t x, uint32_t y, uint32_t z)
 {
 	return (x & y) ^ (~x & z);
 }
 
-__device__ uint32_t MAJ(uint32_t x, uint32_t y, uint32_t z)
+__device__ __forceinline__ uint32_t MAJ(uint32_t x, uint32_t y, uint32_t z)
 {
 	return (x & y) ^ (x & z) ^ (y & z);
 }
 
 
 
-__device__ uint32_t ROTR(uint32_t x, uint8_t n)
+__device__ __forceinline__ uint32_t ROTR(uint32_t x, uint8_t n)
 {
 	return (x >> n) | (x << (32 - n));
 }
 
-__device__ uint32_t SHR(uint32_t x, uint8_t n)
+__device__ __forceinline__ uint32_t SHR(uint32_t x, uint8_t n)
 {
 	return x >> n;
 }
@@ -438,24 +401,22 @@ __device__ uint32_t SHR(uint32_t x, uint8_t n)
 
 //------------------------------------------------------------------------------------------------------------)
 
-__device__ void control(uint8_t* hash, int numberOfdigit, uint64_t globalThreadID, char* c)
+__device__ void control(uint8_t* __restrict__ hash, uint8_t numberOfdigit, uint32_t globalThreadID, uint8_t* __restrict__ c, uint8_t* __restrict__ D_flags, char* __restrict__ D_CORRECT_PASSWORD)
 {
-	bool match = 1;
-	char CORRECT_PASSWORD[32];
 
+
+#pragma unroll
 	for (int a = 0; a < 32; a++)
 	{
-		if (hash[a] != TARGET_HASH[a]) { match = false; break; }
+		if (hash[a] != TARGET_HASH[a]) { return; }
 	}
 
-	if (match)
+	for (int a = 0; a < numberOfdigit; ++a)
 	{
-		printf("🎯 Password found: ");
-		for (int a = 0; a < numberOfdigit; ++a)
-		{
-			printf("%c", c[globalThreadID * numberOfdigit + a]);
-		}
-		printf("\n");
-
+		D_CORRECT_PASSWORD[a] = c[a];
 	}
+	D_CORRECT_PASSWORD[numberOfdigit] = '\0';
+	*D_flags = 1;
 }
+
+
