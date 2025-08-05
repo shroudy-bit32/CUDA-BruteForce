@@ -47,3 +47,7 @@ nvcc -O3 -gencode arch=compute_89,code=sm_89 -Xptxas -v --use_fast_math --maxrre
 - ⏱️ ~6.4 seconds to find correct password
 - 👷‍♂️ 29696 threads used per chunk
 - 🚀 Achieves high occupancy with register-limited kernel
+
+  ## 📄 License
+
+MIT License — free to use, modify, and distribute.
