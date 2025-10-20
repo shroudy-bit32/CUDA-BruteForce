@@ -8,7 +8,7 @@ This program leverages GPU power to explore large password spaces at high speed.
 To compile the optimized and working version of the CUDA brute-force implementation, use the following `nvcc` command:
 
 ```bash
-nvcc -O3 -gencode arch=compute_89,code=sm_89 -Xptxas -v --use_fast_math --maxrregcount=40 kernel.cu -o test.exe
+nvcc -O3 -gencode arch=compute_89,code=sm_89 -Xptxas -v --use_fast_math --maxrregcount=28 kernel.cu -o test.exe
 ```
 
 > ⚠️ **Note:** Make sure to adjust the architecture flags (`arch=compute_XX,code=sm_XX`) based on your GPU model.  
