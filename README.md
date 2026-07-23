@@ -5,6 +5,9 @@ This program leverages GPU power to explore large password spaces at high speed.
 
 ## 🔧 Build Instructions
 
+###  ⚠️ Developer Note: 
+This is an early Proof of Concept (PoC) project. It currently limits the charset to lowercase letters to demonstrate the core parallel brute-forcing logic clearly. Also, please note that due to recent CUDA updates, the current kernel launch configuration might cause register spilling on newer architectures. Thread blocks and dynamic dimensions may require manual tuning for optimal performance on modern GPUs.
+
 To compile the optimized and working version of the CUDA brute-force implementation, use the following `nvcc` command:
 
 ```bash
